@@ -12,12 +12,21 @@ dependencies = [
     "torchvision>=0.19.0",
     "pillow>=10.4.0",
     "python-multipart>=0.0.12",
+    "setuptools<81",
+    "einops>=0.8.0",
+    "pycocotools>=2.0.8",
+    "psutil>=6.0.0",
+    "triton; sys_platform == 'linux'",
+    "sam3",
 ]
 
 [tool.uv]
 dev-dependencies = [
     "watchfiles>=0.24.0",
 ]
+
+[tool.uv.sources]
+sam3 = { git = "https://github.com/facebookresearch/sam3.git" }
 
 [build-system]
 requires = ["hatchling"]

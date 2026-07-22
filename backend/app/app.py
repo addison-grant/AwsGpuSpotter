@@ -14,6 +14,7 @@ Run with: uv run uvicorn app.app:app --host 0.0.0.0 --port 8000
 import asyncio
 import importlib
 import logging
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -28,9 +29,8 @@ from app import cv_worker
 
 logger = logging.getLogger("uvicorn.error")
 
-CHECKPOINT_PATH = "/workspace/checkpoints/sam3.1_hiera_large.pt"
-MODEL_CONFIG = "sam3.1_hiera_l.yaml"
-VIDEO_SOURCE = 0  # local capture device index, or an RTSP/HTTP URL string
+CHECKPOINT_PATH = "/workspace/checkpoints/sam3.1_hiera_tiny.pt"
+VIDEO_SOURCE = "/Users/addisongrant/Workspace/FishAIWorkspace/_VIDEOS_COMMON/initial_test/GOPR7094_trim_720_179s--26sec_grayworld.mov"  # local capture device index, or an RTSP/HTTP URL string
 JPEG_QUALITY = 80
 
 
@@ -56,16 +56,22 @@ def load_sam_predictor():
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
-        logger.warning("CUDA not available -- falling back to CPU (inference will be slow).")
+        # The vendored sam3 package unconditionally calls .cuda() while
+        # building the model, so there is no way to load it on CPU. Skip
+        # loading entirely for local frontend-only dev on a laptop.
+        logger.warning("CUDA not available -- skipping SAM 3.1 model load (inference endpoints will be unavailable).")
+        return None, device
 
     # NOTE: import is deferred so a missing/optional SAM package doesn't
     # block the rest of the app (e.g. during local frontend-only dev).
     from sam3 import build_sam3_predictor  # provided by the SAM 3.1 package
 
+    # Falls back to HuggingFace auto-download when the GPU-instance
+    # checkpoint path isn't present (e.g. local dev on a laptop).
+    checkpoint_path = CHECKPOINT_PATH if os.path.exists(CHECKPOINT_PATH) else None
     predictor = build_sam3_predictor(
-        config_path=MODEL_CONFIG,
-        checkpoint_path=CHECKPOINT_PATH,
-        device=device,
+        checkpoint_path=checkpoint_path,
+        use_fa3=(device == "cuda"),
     )
 
     logger.info("SAM 3.1 predictor loaded onto %s", device)
