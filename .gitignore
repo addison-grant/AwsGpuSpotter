@@ -195,3 +195,4 @@ terraform/*.auto.tfvars
 # uv
 .venv/
 uv.lock
+terraform/terraform.tfvars
