@@ -2,8 +2,8 @@
 Core FastAPI server for the SAM 3.1 live video worker.
 
 Design goal: the SAM 3.1 predictor is loaded onto the GPU exactly once, at
-process startup. Everything that changes during development -- the actual
-per-frame processing logic in cv_worker.py -- is imported as a module
+process startup. Everything that changes during development -- the video
+session and mask overlay logic in cv_worker.py -- is imported as a module
 reference and can be swapped out at runtime via importlib.reload(), so you
 never pay the cost of re-loading multi-GB checkpoints into VRAM just to
 tweak a prompt or an overlay color.
@@ -40,8 +40,10 @@ class AppState:
     def __init__(self):
         self.predictor = None
         self.device: str | None = None
-        self.capture: cv2.VideoCapture | None = None
         self.is_running: bool = False
+        self.worker_thread: threading.Thread | None = None
+        self.stop_event: threading.Event = threading.Event()
+        self.latest_frame = None  # last annotated BGR frame from the active session
         self.lock = threading.Lock()
 
 
@@ -57,10 +59,13 @@ def load_sam_predictor():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         # The vendored sam3 package unconditionally calls .cuda() while
-        # building the model, so there is no way to load it on CPU. Skip
-        # loading entirely for local frontend-only dev on a laptop.
-        logger.warning("CUDA not available -- skipping SAM 3.1 model load (inference endpoints will be unavailable).")
-        return None, device
+        # building the model, so there is no way to load real weights here.
+        # Use a mock predictor instead, so the /start-run -> /video-stream
+        # pipeline is still exercisable during local, GPU-less dev.
+        logger.warning("CUDA not available -- using MockSam3Predictor (no real inference).")
+        from app.mock_predictor import MockSam3Predictor
+
+        return MockSam3Predictor(), device
 
     # NOTE: import is deferred so a missing/optional SAM package doesn't
     # block the rest of the app (e.g. during local frontend-only dev).
@@ -81,10 +86,10 @@ def load_sam_predictor():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state.predictor, state.device = load_sam_predictor()
-    state.capture = cv2.VideoCapture(VIDEO_SOURCE)
     yield
-    if state.capture is not None:
-        state.capture.release()
+    state.stop_event.set()
+    if state.worker_thread is not None:
+        state.worker_thread.join(timeout=5)
 
 
 app = FastAPI(title="SAM 3.1 Live Inference Worker", lifespan=lifespan)
@@ -115,8 +120,44 @@ async def dev_reload():
 
 @app.post("/start-run")
 async def start_run():
+    """
+    Kick off inference: always starts a brand-new SAM 3.1 session from frame
+    0 of VIDEO_SOURCE, superseding any run already in progress.
+    """
+    if state.predictor is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "SAM 3.1 predictor is not loaded (no CUDA device available)."},
+        )
+
     with state.lock:
+        # Tell any in-flight session to stop; it will notice on its next
+        # frame and clean itself up (cancel_propagation + close_session).
+        state.stop_event.set()
+
+        stop_event = threading.Event()
+        state.stop_event = stop_event
+        state.latest_frame = None
         state.is_running = True
+
+        def _on_frame(frame):
+            with state.lock:
+                state.latest_frame = frame
+
+        def _run():
+            try:
+                cv_worker.run_video_session(state.predictor, VIDEO_SOURCE, stop_event, _on_frame)
+            except Exception:
+                logger.exception("Video session failed")
+            finally:
+                with state.lock:
+                    if state.stop_event is stop_event:
+                        state.is_running = False
+
+        thread = threading.Thread(target=_run, daemon=True)
+        state.worker_thread = thread
+        thread.start()
+
     return {"running": True}
 
 
@@ -124,6 +165,7 @@ async def start_run():
 async def stop_run():
     with state.lock:
         state.is_running = False
+        state.stop_event.set()
     return {"running": False}
 
 
@@ -137,24 +179,20 @@ async def health():
 
 
 def _generate_mjpeg_frames():
-    """Blocking generator run in a worker thread; yields multipart JPEG chunks."""
+    """Blocking generator run in a worker thread; yields multipart JPEG chunks.
+
+    Frames come from state.latest_frame, which the active session's worker
+    thread (see /start-run) updates as SAM 3.1 propagates through the video.
+    """
     while True:
-        if not state.is_running or state.capture is None:
+        with state.lock:
+            frame = state.latest_frame
+
+        if frame is None:
             time.sleep(0.1)
             continue
 
-        success, frame = state.capture.read()
-        if not success:
-            time.sleep(0.1)
-            continue
-
-        try:
-            annotated = cv_worker.process_sam_frame(frame, state.predictor)
-        except Exception:
-            logger.exception("Frame processing failed; passing raw frame through")
-            annotated = frame
-
-        ok, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if not ok:
             continue
 
@@ -162,6 +200,7 @@ def _generate_mjpeg_frames():
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
         )
+        time.sleep(1 / 30)
 
 
 async def _mjpeg_async_generator():
