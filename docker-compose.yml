@@ -1,0 +1,37 @@
+services:
+  sam3-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: sam3-gpu-worker:latest
+    container_name: sam3-worker
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "8000:8000"
+    devices:
+      - /dev/video0:/dev/video0
+    volumes:
+      # Persistent EBS volume (mounted at /mnt/sam3-data on the host by
+      # terraform/user_data.sh) bound straight into the container. Both the
+      # app source (for hot-reload edits) and the SAM 3.1 checkpoints live
+      # here, so neither survives -- they're already durable -- a Spot
+      # interruption + replacement instance.
+      - /mnt/sam3-data/app:/workspace/app
+      - /mnt/sam3-data/checkpoints:/workspace/checkpoints
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

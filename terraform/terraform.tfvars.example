@@ -1,0 +1,13 @@
+aws_region        = "us-east-1"
+availability_zone = "us-east-1a"
+
+# GPU-optimized AMI for the AZ above (e.g. AWS Deep Learning AMI, Ubuntu 22.04, NVIDIA driver + Docker preinstalled)
+ami_id = "ami-0123456789abcdef0"
+
+key_name = "my-ec2-keypair"
+
+vpc_id    = "vpc-0123456789abcdef0"
+subnet_id = "subnet-0123456789abcdef0" # must live in availability_zone above
+
+allowed_ssh_cidr  = "203.0.113.0/32" # restrict to your IP
+allowed_http_cidr = "203.0.113.0/32" # restrict to your IP
